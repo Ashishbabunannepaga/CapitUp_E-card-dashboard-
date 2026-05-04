@@ -1,0 +1,8 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting opencv-python-headless
+  Downloading opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl.metadata (19 kB)
+Requirement already satisfied: numpy>=2 in /home/vscode/.local/lib/python3.11/site-packages (from opencv-python-headless) (2.3.5)
+Downloading opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl (60.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 60.4/60.4 MB 41.7 MB/s  0:00:01
+Installing collected packages: opencv-python-headless
+Successfully installed opencv-python-headless-4.13.0.92

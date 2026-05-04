@@ -1,3 +1,11 @@
+import os
+import warnings
+
+# --- SUPPRESS AI & C++ NOISE ---
+os.environ["GLOG_minloglevel"] = "3"   
+os.environ["KMP_WARNINGS"] = "0"       
+warnings.filterwarnings("ignore")      
+
 import streamlit as st
 import fitz  # PyMuPDF
 import cv2
@@ -6,28 +14,23 @@ import pandas as pd
 import logging
 import psycopg2
 import base64
-import zipfile              # <--- NEW
-from io import BytesIO 
+import zipfile
+from io import BytesIO
 from psycopg2.extras import RealDictCursor
 from paddleocr import PaddleOCR
-import os
-import warnings
 from werkzeug.security import generate_password_hash, check_password_hash
-# --- SUPPRESS AI & C++ NOISE ---
-# These must be set before importing PaddleOCR or Streamlit
-os.environ["GLOG_minloglevel"] = "3"   # Suppresses Google C++ Backend logs
-os.environ["KMP_WARNINGS"] = "0"       # Suppresses OpenMP warnings
-warnings.filterwarnings("ignore")      # Suppresses Deprecation & User warnings
+
 # Import our robust Pydantic worker
 from parser_worker import extract_metadata_from_text, CardMetadata
 
 # --- STREAMLIT UI CONFIGURATION ---
 st.set_page_config(page_title="Enterprise E-Card Portal", page_icon="🪪", layout="wide")
 
+# --- DATABASE SECRETS LOAD ---
 try:
     DB_CONFIG = dict(st.secrets["postgres"])
 except KeyError:
-    st.error("🚨 CRITICAL ERROR: Could not find [postgres] in secrets.toml!")
+    st.error("🚨 CRITICAL ERROR: Could not find [postgres] in Streamlit Secrets!")
     st.stop()
 
 # --- CACHE THE AI ENGINE ---
@@ -36,31 +39,34 @@ def load_ocr_engine():
     logging.getLogger('ppocr').setLevel(logging.ERROR)
     return PaddleOCR(use_textline_orientation=True, lang='en')
 
-# --- DATABASE FUNCTIONS (POSTGRESQL) ---
+# --- DATABASE FUNCTIONS (POSTGRESQL / SUPABASE) ---
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 def init_db():
-    """Automatically ensures all tables exist on startup."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-            
-        CREATE TABLE IF NOT EXISTS ecards (
-            id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
-            pdf_data BYTEA NOT NULL, uploaded_by VARCHAR(50) NOT NULL,
-            upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-            
-        CREATE TABLE IF NOT EXISTS card_members (
-            id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
-            name VARCHAR(255), policy_no VARCHAR(100), policy_type VARCHAR(100),
-            card_no VARCHAR(100), relationship VARCHAR(50), age INT, valid_up_to VARCHAR(50));
-    """)
-    conn.commit()
-    conn.close()
+    """Automatically ensures all tables exist in Supabase on startup."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+                
+            CREATE TABLE IF NOT EXISTS ecards (
+                id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
+                pdf_data BYTEA NOT NULL, uploaded_by VARCHAR(50) NOT NULL,
+                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+                
+            CREATE TABLE IF NOT EXISTS card_members (
+                id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
+                name VARCHAR(255), policy_no VARCHAR(100), policy_type VARCHAR(100),
+                card_no VARCHAR(100), relationship VARCHAR(50), age INT, valid_up_to VARCHAR(50));
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Failed to initialize Database: {e}")
 
 def authenticate_user(username, password):
     conn = get_db_connection()
@@ -163,23 +169,18 @@ if 'username' not in st.session_state:
     st.session_state.username = ""
 
 if not st.session_state.logged_in:
-    # Use columns to center the login/register box on the screen
     col1, col2, col3 = st.columns([1, 2, 1])
-    
     with col2:
         st.title("🔐 E-Card System Portal")
         st.markdown("Please log in or register to access the database.")
         
         tab_login, tab_register = st.tabs(["🔑 Login", "📝 Register New User"])
         
-        # --- LOGIN TAB ---
         with tab_login:
             with st.form("login_form"):
                 st.subheader("Login to your account")
                 user_input = st.text_input("Username")
                 pass_input = st.text_input("Password", type="password")
-                
-                # Using width="stretch" to avoid deprecation warnings
                 if st.form_submit_button("Login", width="stretch", type="primary"):
                     if authenticate_user(user_input, pass_input):
                         st.session_state.logged_in = True
@@ -188,14 +189,12 @@ if not st.session_state.logged_in:
                     else:
                         st.error("❌ Invalid Credentials. Please try again.")
                         
-        # --- REGISTER TAB ---
         with tab_register:
             with st.form("register_form"):
-                st.subheader("Create a new Admin account")
+                st.subheader("Create a new account")
                 new_user = st.text_input("Choose a Username")
                 new_pass = st.text_input("Choose a Password", type="password")
                 confirm_pass = st.text_input("Confirm Password", type="password")
-                
                 if st.form_submit_button("Register Account", width="stretch", type="primary"):
                     if not new_user or not new_pass:
                         st.warning("⚠️ Please fill in all fields.")
@@ -206,11 +205,8 @@ if not st.session_state.logged_in:
                     elif create_user(new_user, new_pass):
                         st.success("✅ Account created successfully! Please switch to the Login tab.")
                     else:
-                        st.error("⚠️ Username already exists. Please choose another.")
-                        
-    # st.stop() halts the script here so the main app doesn't load until authenticated
+                        st.error("⚠️ Username already exists.")
     st.stop() 
-
 
 # --- MAIN APPLICATION PORTAL ---
 st.sidebar.title(f"👤 Welcome, {st.session_state.username}")
@@ -220,15 +216,14 @@ if st.sidebar.button("Logout", type="primary", width="stretch"):
     st.rerun()
 
 st.title("🪪 Enterprise E-Card Database Portal")
-main_tab1, main_tab2, main_tab3 = st.tabs(["🔍 Search E-Card", "📊 Candidate Directory & Filters","📤 Upload & Process"])
+main_tab1, main_tab2, main_tab3 = st.tabs(["📤 Upload & Process", "🔍 Search E-Card", "📊 Candidate Directory"])
 
 ocr_engine = load_ocr_engine()
 
 # --- TAB 1: UPLOAD AND SPLIT ---
-with main_tab3:
-    st.markdown("Upload a master PDF. Cards will be split, parsed, pushed to PostgreSQL, and grouped into a ZIP file for download.")
+with main_tab1:
+    st.markdown("Upload a master PDF. Cards will be split, parsed, pushed to Supabase, and grouped into a ZIP file.")
     
-    # Initialize session state variables for the ZIP file so it doesn't disappear on click
     if 'zip_data' not in st.session_state:
         st.session_state.zip_data = None
     if 'processed_count' not in st.session_state:
@@ -236,14 +231,14 @@ with main_tab3:
 
     pdf_file = st.file_uploader("Upload Master E-Card PDF", type=["pdf"])
 
-    if pdf_file and st.button("Process & Save to Database", type="primary", width="stretch"):
+    if pdf_file and st.button("🚀 Process & Save to Database", type="primary", width="stretch"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         doc = fitz.open(stream=pdf_file.getbuffer(), filetype="pdf")
         total_pages = len(doc)
-        employee_data = {}       # {emp_id: [(page_num, rect)]}
-        employee_metadata = {}   # {emp_id: [CardMetadata1, CardMetadata2]}
+        employee_data = {}       
+        employee_metadata = {}   
         
         for page_num in range(total_pages):
             status_text.text(f"Scanning Page {page_num + 1} of {total_pages}...")
@@ -272,12 +267,10 @@ with main_tab3:
                     employee_data[emp_id].append((page_num, rect))
                     employee_metadata[emp_id].append(parsed_data)
 
-        status_text.text("Saving structured data to Database and building ZIP file...")
+        status_text.text("Saving structured data to Supabase and building ZIP file...")
         
-        # 1. Create a virtual ZIP file in memory (no disk clutter)
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            
             for emp_id, locations in employee_data.items():
                 out_pdf = fitz.open()
                 for (page_num, rect) in locations:
@@ -285,24 +278,18 @@ with main_tab3:
                     out_pdf[-1].set_cropbox(rect)
                 
                 pdf_bytes = out_pdf.tobytes()
-                
-                # 2. Push to Database
                 save_card_to_db(emp_id, pdf_bytes, st.session_state.username, employee_metadata[emp_id])
                 
-                # 3. Add file to the virtual ZIP
                 safe_filename = "".join([c for c in emp_id if c.isalnum()]) or "UNIDENTIFIED"
                 zip_file.writestr(f"{safe_filename}_ECard.pdf", pdf_bytes)
-                
                 out_pdf.close()
                 
-        # Save ZIP bytes to session state
         st.session_state.zip_data = zip_buffer.getvalue()
         st.session_state.processed_count = len(employee_data)
             
         progress_bar.progress(1.0)
         status_text.success(f"✅ Extracted and organized data for {len(employee_data)} Employees!")
 
-    # Outside the button logic: If we have a ZIP file in memory, show the download button
     if st.session_state.zip_data:
         st.divider()
         st.success(f"🎉 Ready to download! ({st.session_state.processed_count} categorized PDFs packaged)")
@@ -316,7 +303,7 @@ with main_tab3:
         )
 
 # --- TAB 2: SEARCH & RETRIEVE ---
-with main_tab1:
+with main_tab2:
     col_search, col_btn = st.columns([3, 1])
     with col_search:
         search_id = st.text_input("Enter Employee ID:", label_visibility="collapsed", placeholder="e.g. 1118")
@@ -344,12 +331,10 @@ with main_tab1:
         else:
             st.error("No E-Card found.")
 
-# --- TAB 3: DIRECTORY & FILTERS (NEW) ---
-with main_tab2:
+# --- TAB 3: DIRECTORY & FILTERS ---
+with main_tab3:
     st.markdown("### 🗂️ Global Candidate Directory")
-    st.markdown("Filter, sort, and search across all extracted family members in the database.")
     
-    # Fetch all parsed data
     all_members = get_members_from_db()
     
     if not all_members:
@@ -357,43 +342,22 @@ with main_tab2:
     else:
         df_all = pd.DataFrame(all_members).drop(columns=['id'], errors='ignore')
         
-        # --- UI FILTERS ---
         col_f1, col_f2, col_f3 = st.columns(3)
-        
-        # Filter 1: Free Text Search
         search_term = col_f1.text_input("🔍 Search Name or Emp ID:")
-        
-        # Filter 2: Relationship Dropdown
         relationships = df_all['relationship'].dropna().unique().tolist()
         rel_filter = col_f2.multiselect("👥 Filter by Relationship:", options=relationships, default=[])
-        
-        # Filter 3: Policy Type
         policies = df_all['policy_type'].dropna().unique().tolist()
         pol_filter = col_f3.multiselect("📄 Filter by Policy Type:", options=policies, default=[])
         
-        # --- APPLY LOGIC ---
         filtered_df = df_all.copy()
-        
         if search_term:
-            filtered_df = filtered_df[
-                filtered_df['name'].str.contains(search_term, case=False, na=False) |
-                filtered_df['emp_id'].str.contains(search_term, case=False, na=False)
-            ]
+            filtered_df = filtered_df[filtered_df['name'].str.contains(search_term, case=False, na=False) | filtered_df['emp_id'].str.contains(search_term, case=False, na=False)]
+        if rel_filter: filtered_df = filtered_df[filtered_df['relationship'].isin(rel_filter)]
+        if pol_filter: filtered_df = filtered_df[filtered_df['policy_type'].isin(pol_filter)]
             
-        if rel_filter:
-            filtered_df = filtered_df[filtered_df['relationship'].isin(rel_filter)]
-            
-        if pol_filter:
-            filtered_df = filtered_df[filtered_df['policy_type'].isin(pol_filter)]
-            
-        # --- DISPLAY DATA ---
         st.metric(label="Total Profiles Found", value=len(filtered_df))
-        
-        # Display the highly interactive dataframe
         st.dataframe(
-            filtered_df,
-            hide_index=True,
-            width="stretch",
+            filtered_df, hide_index=True, width="stretch",
             column_config={
                 "emp_id": st.column_config.TextColumn("Employee ID"),
                 "name": st.column_config.TextColumn("Full Name"),

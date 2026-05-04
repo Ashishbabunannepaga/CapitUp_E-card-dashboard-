@@ -326,10 +326,21 @@ with main_tab2:
             st.download_button(label=f"📥 Download {search_id.upper()}'s E-Card", data=pdf_bytes, file_name=f"{search_id.upper()}.pdf", mime="application/pdf", type="primary")
 
             st.divider()
-            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>', unsafe_allow_html=True)
-        else:
-            st.error("No E-Card found.")
+            st.subheader("👁️ Live E-Card Preview")
+            
+            # Open the PDF securely from memory
+            preview_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            # Render each page as a crisp, high-definition image
+            for page_num in range(len(preview_doc)):
+                page = preview_doc[page_num]
+                pix = page.get_pixmap(dpi=150)  # 150 DPI for crystal clear text
+                img_bytes = pix.tobytes("png")
+                
+                # Display the image flawlessly using Streamlit's native image viewer
+                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", use_column_width=True)
+                
+            preview_doc.close()
 
 # --- TAB 3: DIRECTORY & FILTERS ---
 with main_tab3:

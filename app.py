@@ -68,6 +68,17 @@ def init_db():
     except Exception as e:
         st.error(f"Failed to initialize Database: {e}")
 
+
+def get_all_cards_from_db():
+    """Fetches every single PDF currently stored in the database."""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT emp_id, pdf_data FROM ecards;")
+    results = cursor.fetchall()
+    conn.close()
+    return results
+    
+
 def authenticate_user(username, password):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -221,13 +232,21 @@ main_tab1, main_tab2, main_tab3 = st.tabs(["📤 Upload & Process", "🔍 Search
 ocr_engine = load_ocr_engine()
 
 # --- TAB 1: UPLOAD AND SPLIT ---
+# --- TAB 1: UPLOAD AND SPLIT ---
 with main_tab1:
     st.markdown("Upload a master PDF. Cards will be split, parsed, pushed to Supabase, and grouped into a ZIP file.")
     
+    # Session state for current upload zip
     if 'zip_data' not in st.session_state:
         st.session_state.zip_data = None
     if 'processed_count' not in st.session_state:
         st.session_state.processed_count = 0
+        
+    # Session state for historical database zip
+    if 'historical_zip' not in st.session_state:
+        st.session_state.historical_zip = None
+    if 'historical_count' not in st.session_state:
+        st.session_state.historical_count = 0
 
     pdf_file = st.file_uploader("Upload Master E-Card PDF", type=["pdf"])
 
@@ -291,16 +310,52 @@ with main_tab1:
         status_text.success(f"✅ Extracted and organized data for {len(employee_data)} Employees!")
 
     if st.session_state.zip_data:
-        st.divider()
         st.success(f"🎉 Ready to download! ({st.session_state.processed_count} categorized PDFs packaged)")
         st.download_button(
-            label="📥 Download All Split PDFs (ZIP)",
+            label="📥 Download This Batch (ZIP)",
             data=st.session_state.zip_data,
-            file_name="Categorized_ECards.zip",
+            file_name="Categorized_ECards_Batch.zip",
             mime="application/zip",
             type="primary",
             width="stretch"
         )
+
+    # --- NEW FEATURE: HISTORICAL DATABASE DOWNLOAD ---
+    st.divider()
+    st.markdown("### 📦 Database Backup & Recovery")
+    st.markdown("Need previously split files? Download a ZIP containing every single E-Card currently stored in the database.")
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("🗄️ Compile Master ZIP from Database", width="stretch"):
+            with st.spinner("Fetching all cards from Supabase and building ZIP..."):
+                all_cards = get_all_cards_from_db()
+                
+                if not all_cards:
+                    st.warning("The database is currently empty.")
+                else:
+                    hist_zip_buffer = BytesIO()
+                    with zipfile.ZipFile(hist_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for card in all_cards:
+                            emp_id = card['emp_id']
+                            pdf_bytes = bytes(card['pdf_data'])
+                            safe_filename = "".join([c for c in emp_id if c.isalnum()]) or "UNIDENTIFIED"
+                            zip_file.writestr(f"{safe_filename}_ECard.pdf", pdf_bytes)
+                    
+                    st.session_state.historical_zip = hist_zip_buffer.getvalue()
+                    st.session_state.historical_count = len(all_cards)
+                    st.success(f"✅ Compiled {len(all_cards)} cards successfully!")
+    
+    with col2:
+        if st.session_state.historical_zip:
+            st.download_button(
+                label=f"📥 Download Master ZIP ({st.session_state.historical_count} Cards)",
+                data=st.session_state.historical_zip,
+                file_name="Master_Database_ECards.zip",
+                mime="application/zip",
+                type="primary",
+                width="stretch"
+            )
 
 # --- TAB 2: SEARCH & RETRIEVE ---
 with main_tab2:

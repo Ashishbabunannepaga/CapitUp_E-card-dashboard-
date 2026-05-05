@@ -393,7 +393,7 @@ with main_tab2:
                 img_bytes = pix.tobytes("png")
                 
                 # Display the image flawlessly using Streamlit's native image viewer
-                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", use_column_width=True)
+                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", use_container_width=True)
                 
             preview_doc.close()
 

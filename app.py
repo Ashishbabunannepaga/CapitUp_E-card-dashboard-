@@ -182,10 +182,10 @@ if 'username' not in st.session_state:
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("🔐 E-Card System Portal")
+        st.title("E-Card System Portal")
         st.markdown("Please log in or register to access the database.")
         
-        tab_login, tab_register = st.tabs(["🔑 Login", "📝 Register New User"])
+        tab_login, tab_register = st.tabs([" Login", "Register New User"])
         
         with tab_login:
             with st.form("login_form"):
@@ -312,7 +312,7 @@ with main_tab1:
     if st.session_state.zip_data:
         st.success(f"🎉 Ready to download! ({st.session_state.processed_count} categorized PDFs packaged)")
         st.download_button(
-            label="📥 Download This Batch (ZIP)",
+            label=" Download This Batch (ZIP)",
             data=st.session_state.zip_data,
             file_name="Categorized_ECards_Batch.zip",
             mime="application/zip",
@@ -349,7 +349,7 @@ with main_tab1:
     with col2:
         if st.session_state.historical_zip:
             st.download_button(
-                label=f"📥 Download Master ZIP ({st.session_state.historical_count} Cards)",
+                label=f" Download Master ZIP ({st.session_state.historical_count} Cards)",
                 data=st.session_state.historical_zip,
                 file_name="Master_Database_ECards.zip",
                 mime="application/zip",

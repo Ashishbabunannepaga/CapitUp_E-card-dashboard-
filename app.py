@@ -20,8 +20,7 @@ os.environ["GLOG_minloglevel"] = "3"   # Suppresses Google C++ Backend logs
 os.environ["KMP_WARNINGS"] = "0"       # Suppresses OpenMP warnings
 warnings.filterwarnings("ignore")      # Suppresses Deprecation & User warnings
 
-# Load the environment variables from the .env file
-load_dotenv()
+
 
 # Import our robust Pydantic worker
 from parser_worker import extract_metadata_from_text, CardMetadata
@@ -30,22 +29,7 @@ from parser_worker import extract_metadata_from_text, CardMetadata
 st.set_page_config(page_title="Enterprise E-Card Portal", page_icon="🪪", layout="wide")
 
 # --- SMART DATABASE CONFIGURATION ---
-try:
-    # 1. Try to load credentials from the .env file first (Local Development)
-    if os.getenv("DB_HOST"):
-        DB_CONFIG = {
-            'host': os.getenv("DB_HOST"),
-            'port': os.getenv("DB_PORT"),
-            'user': os.getenv("DB_USER"),
-            'password': os.getenv("DB_PASSWORD"),
-            'dbname': os.getenv("DB_NAME")
-        }
-    # 2. If .env is missing, fall back to Streamlit Secrets (Cloud Deployment)
-    else:
-        DB_CONFIG = dict(st.secrets["postgres"])
-except KeyError:
-    st.error("🚨 CRITICAL ERROR: Could not find Database credentials in .env or secrets.toml!")
-    st.stop()
+)
 
 # --- CACHE THE AI ENGINE ---
 @st.cache_resource(show_spinner="Loading AI Vision Engine... (First load takes a few seconds)")

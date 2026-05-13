@@ -28,8 +28,7 @@ from parser_worker import extract_metadata_from_text, CardMetadata
 # --- STREAMLIT UI CONFIGURATION ---
 st.set_page_config(page_title="Enterprise E-Card Portal", page_icon="🪪", layout="wide")
 
-# --- SMART DATABASE CONFIGURATION ---
-)
+
 
 # --- CACHE THE AI ENGINE ---
 @st.cache_resource(show_spinner="Loading AI Vision Engine... (First load takes a few seconds)")

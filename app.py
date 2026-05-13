@@ -13,7 +13,7 @@ from paddleocr import PaddleOCR
 import os
 import warnings
 from werkzeug.security import generate_password_hash, check_password_hash
-from dotenv import load_dotenv  # <--- NEW: Environment variable loader
+
 
 # --- SUPPRESS AI & C++ NOISE ---
 os.environ["GLOG_minloglevel"] = "3"   # Suppresses Google C++ Backend logs

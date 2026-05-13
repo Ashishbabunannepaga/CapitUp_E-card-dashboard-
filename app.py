@@ -14,13 +14,10 @@ import os
 import warnings
 from werkzeug.security import generate_password_hash, check_password_hash
 
-
 # --- SUPPRESS AI & C++ NOISE ---
 os.environ["GLOG_minloglevel"] = "3"   # Suppresses Google C++ Backend logs
 os.environ["KMP_WARNINGS"] = "0"       # Suppresses OpenMP warnings
 warnings.filterwarnings("ignore")      # Suppresses Deprecation & User warnings
-
-
 
 # Import our robust Pydantic worker
 from parser_worker import extract_metadata_from_text, CardMetadata
@@ -28,7 +25,13 @@ from parser_worker import extract_metadata_from_text, CardMetadata
 # --- STREAMLIT UI CONFIGURATION ---
 st.set_page_config(page_title="Enterprise E-Card Portal", page_icon="🪪", layout="wide")
 
-
+# --- CLOUD DATABASE CONFIGURATION ---
+try:
+    # Strictly load credentials from Streamlit Secrets for Cloud Deployment
+    DB_CONFIG = dict(st.secrets["postgres"])
+except KeyError:
+    st.error("🚨 CRITICAL ERROR: Could not find [postgres] Database credentials in Streamlit Secrets!")
+    st.stop()
 
 # --- CACHE THE AI ENGINE ---
 @st.cache_resource(show_spinner="Loading AI Vision Engine... (First load takes a few seconds)")
@@ -39,6 +42,8 @@ def load_ocr_engine():
 
 # --- DATABASE FUNCTIONS (POSTGRESQL) ---
 def get_db_connection():
+    # If your secrets use the single URL string, use: return psycopg2.connect(DB_CONFIG["url"])
+    # Otherwise, this unpacks the host, port, user, password dictionary:
     return psycopg2.connect(**DB_CONFIG)
 
 def init_db():
@@ -215,7 +220,7 @@ if st.sidebar.button("Logout", type="primary", width="stretch"):
 
 st.title("🪪 Enterprise E-Card Database Portal")
 
-main_tab4, main_tab2, main_tab3, main_tab1 = st.tabs(["📥 Bulk Retrieval", "📊 Candidate Directory & Filters", "📤 Upload & Process", "🔍 Search E-Card",])
+main_tab4, main_tab2, main_tab3, main_tab1 = st.tabs(["📥 Bulk Retrieval", "📊 Candidate Directory & Filters", "📤 Upload & Process", "🔍 Search E-Card"])
 
 ocr_engine = load_ocr_engine()
 
@@ -252,7 +257,7 @@ with main_tab1:
                 pix = page.get_pixmap(dpi=150)
                 img_bytes = pix.tobytes("png")
                 # use_container_width replaces the deprecated use_column_width
-                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", width="stretch")
+                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", use_container_width=True)
             preview_doc.close()
         else:
             st.error("No E-Card found.")

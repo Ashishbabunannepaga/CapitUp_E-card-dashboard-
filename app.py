@@ -1,11 +1,3 @@
-import os
-import warnings
-
-# --- SUPPRESS AI & C++ NOISE ---
-os.environ["GLOG_minloglevel"] = "3"   
-os.environ["KMP_WARNINGS"] = "0"       
-warnings.filterwarnings("ignore")      
-
 import streamlit as st
 import fitz  # PyMuPDF
 import cv2
@@ -14,11 +6,22 @@ import pandas as pd
 import logging
 import psycopg2
 import base64
-import zipfile
-from io import BytesIO
+import zipfile              
+from io import BytesIO 
 from psycopg2.extras import RealDictCursor
 from paddleocr import PaddleOCR
+import os
+import warnings
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv  # <--- NEW: Environment variable loader
+
+# --- SUPPRESS AI & C++ NOISE ---
+os.environ["GLOG_minloglevel"] = "3"   # Suppresses Google C++ Backend logs
+os.environ["KMP_WARNINGS"] = "0"       # Suppresses OpenMP warnings
+warnings.filterwarnings("ignore")      # Suppresses Deprecation & User warnings
+
+# Load the environment variables from the .env file
+load_dotenv()
 
 # Import our robust Pydantic worker
 from parser_worker import extract_metadata_from_text, CardMetadata
@@ -26,58 +29,56 @@ from parser_worker import extract_metadata_from_text, CardMetadata
 # --- STREAMLIT UI CONFIGURATION ---
 st.set_page_config(page_title="Enterprise E-Card Portal", page_icon="🪪", layout="wide")
 
-# --- DATABASE SECRETS LOAD ---
+# --- SMART DATABASE CONFIGURATION ---
 try:
-    DB_CONFIG = dict(st.secrets["postgres"])
+    # 1. Try to load credentials from the .env file first (Local Development)
+    if os.getenv("DB_HOST"):
+        DB_CONFIG = {
+            'host': os.getenv("DB_HOST"),
+            'port': os.getenv("DB_PORT"),
+            'user': os.getenv("DB_USER"),
+            'password': os.getenv("DB_PASSWORD"),
+            'dbname': os.getenv("DB_NAME")
+        }
+    # 2. If .env is missing, fall back to Streamlit Secrets (Cloud Deployment)
+    else:
+        DB_CONFIG = dict(st.secrets["postgres"])
 except KeyError:
-    st.error("🚨 CRITICAL ERROR: Could not find [postgres] in Streamlit Secrets!")
+    st.error("🚨 CRITICAL ERROR: Could not find Database credentials in .env or secrets.toml!")
     st.stop()
 
 # --- CACHE THE AI ENGINE ---
 @st.cache_resource(show_spinner="Loading AI Vision Engine... (First load takes a few seconds)")
 def load_ocr_engine():
     logging.getLogger('ppocr').setLevel(logging.ERROR)
+    # Fixed argument to prevent crashes on new versions
     return PaddleOCR(use_textline_orientation=True, lang='en')
 
-# --- DATABASE FUNCTIONS (POSTGRESQL / SUPABASE) ---
+# --- DATABASE FUNCTIONS (POSTGRESQL) ---
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 def init_db():
-    """Automatically ensures all tables exist in Supabase on startup."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-                
-            CREATE TABLE IF NOT EXISTS ecards (
-                id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
-                pdf_data BYTEA NOT NULL, uploaded_by VARCHAR(50) NOT NULL,
-                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-                
-            CREATE TABLE IF NOT EXISTS card_members (
-                id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
-                name VARCHAR(255), policy_no VARCHAR(100), policy_type VARCHAR(100),
-                card_no VARCHAR(100), relationship VARCHAR(50), age INT, valid_up_to VARCHAR(50));
-        """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Failed to initialize Database: {e}")
-
-
-def get_all_cards_from_db():
-    """Fetches every single PDF currently stored in the database."""
+    """Automatically ensures all tables exist on startup."""
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT emp_id, pdf_data FROM ecards;")
-    results = cursor.fetchall()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+            
+        CREATE TABLE IF NOT EXISTS ecards (
+            id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
+            pdf_data BYTEA NOT NULL, uploaded_by VARCHAR(50) NOT NULL,
+            upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+            
+        CREATE TABLE IF NOT EXISTS card_members (
+            id SERIAL PRIMARY KEY, emp_id VARCHAR(50) NOT NULL,
+            name VARCHAR(255), policy_no VARCHAR(100), policy_type VARCHAR(100),
+            card_no VARCHAR(100), relationship VARCHAR(50), age INT, valid_up_to VARCHAR(50));
+    """)
+    conn.commit()
     conn.close()
-    return results
-    
 
 def authenticate_user(username, password):
     conn = get_db_connection()
@@ -103,12 +104,10 @@ def save_card_to_db(emp_id, pdf_bytes, username, family_members):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Save the actual PDF
     cursor.execute("DELETE FROM ecards WHERE emp_id = %s;", (emp_id,))
     cursor.execute("INSERT INTO ecards (emp_id, pdf_data, uploaded_by) VALUES (%s, %s, %s);",
                    (emp_id, psycopg2.Binary(pdf_bytes), username))
                    
-    # 2. Save the extracted metadata for family members
     cursor.execute("DELETE FROM card_members WHERE emp_id = %s;", (emp_id,))
     for member in family_members:
         cursor.execute("""
@@ -136,6 +135,17 @@ def get_members_from_db(emp_id=None):
         cursor.execute("SELECT * FROM card_members WHERE emp_id = %s ORDER BY relationship DESC;", (emp_id,))
     else:
         cursor.execute("SELECT * FROM card_members ORDER BY emp_id;")
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_bulk_cards_from_db(emp_ids):
+    if not emp_ids:
+        return []
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    query = "SELECT emp_id, pdf_data FROM ecards WHERE emp_id IN %s;"
+    cursor.execute(query, (tuple(emp_ids),))
     results = cursor.fetchall()
     conn.close()
     return results
@@ -182,10 +192,9 @@ if 'username' not in st.session_state:
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("E-Card System Portal")
+        st.title("🔐 E-Card System Portal")
         st.markdown("Please log in or register to access the database.")
-        
-        tab_login, tab_register = st.tabs([" Login", "Register New User"])
+        tab_login, tab_register = st.tabs(["🔑 Login", "📝 Register New User"])
         
         with tab_login:
             with st.form("login_form"):
@@ -202,21 +211,16 @@ if not st.session_state.logged_in:
                         
         with tab_register:
             with st.form("register_form"):
-                st.subheader("Create a new account")
+                st.subheader("Create a new Admin account")
                 new_user = st.text_input("Choose a Username")
                 new_pass = st.text_input("Choose a Password", type="password")
                 confirm_pass = st.text_input("Confirm Password", type="password")
                 if st.form_submit_button("Register Account", width="stretch", type="primary"):
-                    if not new_user or not new_pass:
-                        st.warning("⚠️ Please fill in all fields.")
-                    elif new_pass != confirm_pass:
-                        st.error("❌ Passwords do not match!")
-                    elif len(new_pass) < 6:
-                        st.error("⚠️ Password must be at least 6 characters long.")
-                    elif create_user(new_user, new_pass):
-                        st.success("✅ Account created successfully! Please switch to the Login tab.")
-                    else:
-                        st.error("⚠️ Username already exists.")
+                    if not new_user or not new_pass: st.warning("⚠️ Please fill in all fields.")
+                    elif new_pass != confirm_pass: st.error("❌ Passwords do not match!")
+                    elif len(new_pass) < 6: st.error("⚠️ Password must be at least 6 characters long.")
+                    elif create_user(new_user, new_pass): st.success("✅ Account created successfully! Please switch to the Login tab.")
+                    else: st.error("⚠️ Username already exists. Please choose another.")
     st.stop() 
 
 # --- MAIN APPLICATION PORTAL ---
@@ -227,138 +231,13 @@ if st.sidebar.button("Logout", type="primary", width="stretch"):
     st.rerun()
 
 st.title("🪪 Enterprise E-Card Database Portal")
-main_tab1, main_tab2, main_tab3 = st.tabs(["📤 Upload & Process", "🔍 Search E-Card", "📊 Candidate Directory"])
+
+main_tab4, main_tab2, main_tab3, main_tab1 = st.tabs(["📥 Bulk Retrieval", "📊 Candidate Directory & Filters", "📤 Upload & Process", "🔍 Search E-Card",])
 
 ocr_engine = load_ocr_engine()
 
-# --- TAB 1: UPLOAD AND SPLIT ---
-# --- TAB 1: UPLOAD AND SPLIT ---
+# --- TAB 1: SEARCH & RETRIEVE ---
 with main_tab1:
-    st.markdown("Upload a master PDF. Cards will be split, parsed, pushed to Supabase, and grouped into a ZIP file.")
-    
-    # Session state for current upload zip
-    if 'zip_data' not in st.session_state:
-        st.session_state.zip_data = None
-    if 'processed_count' not in st.session_state:
-        st.session_state.processed_count = 0
-        
-    # Session state for historical database zip
-    if 'historical_zip' not in st.session_state:
-        st.session_state.historical_zip = None
-    if 'historical_count' not in st.session_state:
-        st.session_state.historical_count = 0
-
-    pdf_file = st.file_uploader("Upload Master E-Card PDF", type=["pdf"])
-
-    if pdf_file and st.button("🚀 Process & Save to Database", type="primary", width="stretch"):
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        doc = fitz.open(stream=pdf_file.getbuffer(), filetype="pdf")
-        total_pages = len(doc)
-        employee_data = {}       
-        employee_metadata = {}   
-        
-        for page_num in range(total_pages):
-            status_text.text(f"Scanning Page {page_num + 1} of {total_pages}...")
-            progress_bar.progress((page_num) / total_pages)
-            page = doc[page_num]
-            
-            for rect in detect_card_boundaries(page):
-                raw_text = page.get_text("text", clip=rect)
-                
-                if "Emp" not in raw_text:
-                    try:
-                        pix = page.get_pixmap(clip=rect, dpi=300)
-                        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                        res = ocr_engine.ocr(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), cls=False)
-                        if res and res[0]:
-                            raw_text += " \n " + " ".join([line[1][0] for line in res[0]])
-                    except: pass
-                
-                parsed_data = extract_metadata_from_text(raw_text)
-                emp_id = parsed_data.emp_id
-                
-                if emp_id:
-                    if emp_id not in employee_data: 
-                        employee_data[emp_id] = []
-                        employee_metadata[emp_id] = []
-                    employee_data[emp_id].append((page_num, rect))
-                    employee_metadata[emp_id].append(parsed_data)
-
-        status_text.text("Saving structured data to Supabase and building ZIP file...")
-        
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for emp_id, locations in employee_data.items():
-                out_pdf = fitz.open()
-                for (page_num, rect) in locations:
-                    out_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                    out_pdf[-1].set_cropbox(rect)
-                
-                pdf_bytes = out_pdf.tobytes()
-                save_card_to_db(emp_id, pdf_bytes, st.session_state.username, employee_metadata[emp_id])
-                
-                safe_filename = "".join([c for c in emp_id if c.isalnum()]) or "UNIDENTIFIED"
-                zip_file.writestr(f"{safe_filename}_ECard.pdf", pdf_bytes)
-                out_pdf.close()
-                
-        st.session_state.zip_data = zip_buffer.getvalue()
-        st.session_state.processed_count = len(employee_data)
-            
-        progress_bar.progress(1.0)
-        status_text.success(f"✅ Extracted and organized data for {len(employee_data)} Employees!")
-
-    if st.session_state.zip_data:
-        st.success(f"🎉 Ready to download! ({st.session_state.processed_count} categorized PDFs packaged)")
-        st.download_button(
-            label=" Download This Batch (ZIP)",
-            data=st.session_state.zip_data,
-            file_name="Categorized_ECards_Batch.zip",
-            mime="application/zip",
-            type="primary",
-            width="stretch"
-        )
-
-    # --- NEW FEATURE: HISTORICAL DATABASE DOWNLOAD ---
-    st.divider()
-    st.markdown("### 📦 Database Backup & Recovery")
-    st.markdown("Need previously split files? Download a ZIP containing every single E-Card currently stored in the database.")
-    
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("🗄️ Compile Master ZIP from Database", width="stretch"):
-            with st.spinner("Fetching all cards from Supabase and building ZIP..."):
-                all_cards = get_all_cards_from_db()
-                
-                if not all_cards:
-                    st.warning("The database is currently empty.")
-                else:
-                    hist_zip_buffer = BytesIO()
-                    with zipfile.ZipFile(hist_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                        for card in all_cards:
-                            emp_id = card['emp_id']
-                            pdf_bytes = bytes(card['pdf_data'])
-                            safe_filename = "".join([c for c in emp_id if c.isalnum()]) or "UNIDENTIFIED"
-                            zip_file.writestr(f"{safe_filename}_ECard.pdf", pdf_bytes)
-                    
-                    st.session_state.historical_zip = hist_zip_buffer.getvalue()
-                    st.session_state.historical_count = len(all_cards)
-                    st.success(f"✅ Compiled {len(all_cards)} cards successfully!")
-    
-    with col2:
-        if st.session_state.historical_zip:
-            st.download_button(
-                label=f" Download Master ZIP ({st.session_state.historical_count} Cards)",
-                data=st.session_state.historical_zip,
-                file_name="Master_Database_ECards.zip",
-                mime="application/zip",
-                type="primary",
-                width="stretch"
-            )
-
-# --- TAB 2: SEARCH & RETRIEVE ---
-with main_tab2:
     col_search, col_btn = st.columns([3, 1])
     with col_search:
         search_id = st.text_input("Enter Employee ID:", label_visibility="collapsed", placeholder="e.g. 1118")
@@ -383,28 +262,27 @@ with main_tab2:
             st.divider()
             st.subheader("👁️ Live E-Card Preview")
             
-            # Open the PDF securely from memory
+            # Browser-safe image rendering (Prevents the red blocked CSP icon)
             preview_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            
-            # Render each page as a crisp, high-definition image
             for page_num in range(len(preview_doc)):
                 page = preview_doc[page_num]
-                pix = page.get_pixmap(dpi=150)  # 150 DPI for crystal clear text
+                pix = page.get_pixmap(dpi=150)
                 img_bytes = pix.tobytes("png")
-                
-                # Display the image flawlessly using Streamlit's native image viewer
-                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", use_container_width=True)
-                
+                # use_container_width replaces the deprecated use_column_width
+                st.image(img_bytes, caption=f"Card Preview (Page {page_num + 1})", width="stretch")
             preview_doc.close()
+        else:
+            st.error("No E-Card found.")
 
-# --- TAB 3: DIRECTORY & FILTERS ---
-with main_tab3:
+# --- TAB 2: DIRECTORY & FILTERS ---
+with main_tab2:
     st.markdown("### 🗂️ Global Candidate Directory")
+    st.markdown("Filter, sort, and search across all extracted family members in the database.")
     
     all_members = get_members_from_db()
     
     if not all_members:
-        st.info("No data available yet. Please upload and process a PDF in Tab 1.")
+        st.info("No data available yet. Please upload and process a PDF in Tab 3.")
     else:
         df_all = pd.DataFrame(all_members).drop(columns=['id'], errors='ignore')
         
@@ -416,14 +294,23 @@ with main_tab3:
         pol_filter = col_f3.multiselect("📄 Filter by Policy Type:", options=policies, default=[])
         
         filtered_df = df_all.copy()
+        
         if search_term:
-            filtered_df = filtered_df[filtered_df['name'].str.contains(search_term, case=False, na=False) | filtered_df['emp_id'].str.contains(search_term, case=False, na=False)]
-        if rel_filter: filtered_df = filtered_df[filtered_df['relationship'].isin(rel_filter)]
-        if pol_filter: filtered_df = filtered_df[filtered_df['policy_type'].isin(pol_filter)]
+            filtered_df = filtered_df[
+                filtered_df['name'].str.contains(search_term, case=False, na=False) |
+                filtered_df['emp_id'].str.contains(search_term, case=False, na=False)
+            ]
+        if rel_filter:
+            filtered_df = filtered_df[filtered_df['relationship'].isin(rel_filter)]
+        if pol_filter:
+            filtered_df = filtered_df[filtered_df['policy_type'].isin(pol_filter)]
             
         st.metric(label="Total Profiles Found", value=len(filtered_df))
+        
         st.dataframe(
-            filtered_df, hide_index=True, width="stretch",
+            filtered_df,
+            hide_index=True,
+            width="stretch",
             column_config={
                 "emp_id": st.column_config.TextColumn("Employee ID"),
                 "name": st.column_config.TextColumn("Full Name"),
@@ -431,4 +318,140 @@ with main_tab3:
                 "policy_no": st.column_config.TextColumn("Policy Number"),
                 "card_no": st.column_config.TextColumn("Card Number")
             }
+        )
+
+# --- TAB 3: UPLOAD AND SPLIT ---
+with main_tab3:
+    st.markdown("Upload a master PDF. Cards will be split, parsed, pushed to PostgreSQL, and grouped into a ZIP file for download.")
+    
+    if 'zip_data' not in st.session_state:
+        st.session_state.zip_data = None
+    if 'processed_count' not in st.session_state:
+        st.session_state.processed_count = 0
+
+    pdf_file = st.file_uploader("Upload Master E-Card PDF", type=["pdf"])
+
+    if pdf_file and st.button("Process & Save to Database", type="primary", width="stretch"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        doc = fitz.open(stream=pdf_file.getbuffer(), filetype="pdf")
+        total_pages = len(doc)
+        employee_data = {}       
+        employee_metadata = {}   
+        
+        for page_num in range(total_pages):
+            status_text.text(f"Scanning Page {page_num + 1} of {total_pages}...")
+            progress_bar.progress((page_num) / total_pages)
+            page = doc[page_num]
+            
+            for rect in detect_card_boundaries(page):
+                raw_text = page.get_text("text", clip=rect)
+                
+                # Dual-Engine: If native text is missing, run OCR
+                if "Emp" not in raw_text:
+                    try:
+                        pix = page.get_pixmap(clip=rect, dpi=300)
+                        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+                        res = ocr_engine.ocr(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), cls=False)
+                        if res and res[0]:
+                            raw_text += " \n " + " ".join([line[1][0] for line in res[0]])
+                    except: pass
+                
+                parsed_data = extract_metadata_from_text(raw_text)
+                emp_id = parsed_data.emp_id
+                
+                if emp_id:
+                    if emp_id not in employee_data: 
+                        employee_data[emp_id] = []
+                        employee_metadata[emp_id] = []
+                    employee_data[emp_id].append((page_num, rect))
+                    employee_metadata[emp_id].append(parsed_data)
+
+        status_text.text("Saving structured data to Database and building ZIP file...")
+        
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            
+            for emp_id, locations in employee_data.items():
+                out_pdf = fitz.open()
+                for (page_num, rect) in locations:
+                    out_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    out_pdf[-1].set_cropbox(rect)
+                
+                pdf_bytes = out_pdf.tobytes()
+                save_card_to_db(emp_id, pdf_bytes, st.session_state.username, employee_metadata[emp_id])
+                
+                safe_filename = "".join([c for c in emp_id if c.isalnum()]) or "UNIDENTIFIED"
+                zip_file.writestr(f"{safe_filename}_ECard.pdf", pdf_bytes)
+                out_pdf.close()
+                
+        st.session_state.zip_data = zip_buffer.getvalue()
+        st.session_state.processed_count = len(employee_data)
+            
+        progress_bar.progress(1.0)
+        status_text.success(f"✅ Extracted and organized data for {len(employee_data)} Employees!")
+
+    if st.session_state.zip_data:
+        st.divider()
+        st.success(f"🎉 Ready to download! ({st.session_state.processed_count} categorized PDFs packaged)")
+        st.download_button(
+            label="📥 Download All Split PDFs (ZIP)",
+            data=st.session_state.zip_data,
+            file_name="Categorized_ECards.zip",
+            mime="application/zip",
+            type="primary",
+            width="stretch"
+        )
+
+# --- TAB 4: BULK RETRIEVAL ---
+with main_tab4:
+    st.markdown("### 📥 Bulk E-Card Retrieval")
+    st.markdown("Paste a list of Employee IDs to instantly generate a custom ZIP file containing only those specific E-Cards.")
+    
+    if 'bulk_zip_data' not in st.session_state:
+        st.session_state.bulk_zip_data = None
+    if 'bulk_stats' not in st.session_state:
+        st.session_state.bulk_stats = ""
+        
+    bulk_input = st.text_area("List of Employee IDs (separated by commas, spaces, or new lines):", height=150, placeholder="1118\n120\n103\n...")
+    
+    if st.button("📦 Fetch Cards & Build ZIP", type="primary", width="stretch"):
+        if not bulk_input.strip():
+            st.warning("⚠️ Please enter at least one Employee ID.")
+        else:
+            with st.spinner("Searching database and building ZIP..."):
+                raw_ids = bulk_input.replace(',', ' ').split()
+                clean_ids = list(set([i.strip().upper() for i in raw_ids if i.strip()]))
+                
+                found_cards = get_bulk_cards_from_db(clean_ids)
+                
+                if not found_cards:
+                    st.error("❌ None of the requested IDs were found in the database.")
+                else:
+                    found_ids = [card['emp_id'] for card in found_cards]
+                    missing_ids = [i for i in clean_ids if i not in found_ids]
+                    
+                    bulk_zip_buffer = BytesIO()
+                    with zipfile.ZipFile(bulk_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for card in found_cards:
+                            safe_filename = "".join([c for c in card['emp_id'] if c.isalnum()]) or "UNIDENTIFIED"
+                            zf.writestr(f"{safe_filename}_ECard.pdf", bytes(card['pdf_data']))
+                            
+                    st.session_state.bulk_zip_data = bulk_zip_buffer.getvalue()
+                    
+                    stats_msg = f"✅ Successfully bundled **{len(found_cards)}** cards out of {len(clean_ids)} requested."
+                    if missing_ids:
+                        stats_msg += f"\n\n⚠️ **Missing IDs in Database ({len(missing_ids)}):** {', '.join(missing_ids)}"
+                    st.session_state.bulk_stats = stats_msg
+                    
+    if st.session_state.bulk_zip_data:
+        st.info(st.session_state.bulk_stats)
+        st.download_button(
+            label="📥 Download Custom Batch ZIP",
+            data=st.session_state.bulk_zip_data,
+            file_name="Custom_Bulk_ECards.zip",
+            mime="application/zip",
+            type="primary",
+            width="stretch"
         )
